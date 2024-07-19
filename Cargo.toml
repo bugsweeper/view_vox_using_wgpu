@@ -1,0 +1,33 @@
+[package]
+name = "vox_in_wgpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cfg-if = "1"
+env_logger = "0.11.3"
+log = "0.4"
+wgpu = "0.20"
+winit = "0.29"
+pollster = "0.3"
+bytemuck = { version = "1.12", features = [ "derive" ] }
+glam = "0.28"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dot_vox = "5.1.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.6"
+console_log = "1.0"
+wgpu = { version = "0.20", features = ["webgl"]}
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4.30"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+]}
+dot_vox = { version = "5.1.1", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
