@@ -6,7 +6,10 @@ mod model;
 use camera::{Camera, CameraController, CameraUniform, Projection};
 use glam::{Quat, Vec3};
 use model::{Instance, Vertex, INDICES, VERTICES};
-use std::{f32::consts, time::Duration};
+use std::{
+    f32::consts,
+    time::{Duration, Instant},
+};
 use wgpu::util::DeviceExt;
 use winit::{
     event::{DeviceEvent, ElementState, Event, KeyEvent, MouseButton, WindowEvent},
@@ -46,6 +49,8 @@ struct State<'a> {
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     mouse_pressed: bool,
+    last_render_time: Instant,
+    frames: u16,
 }
 
 impl<'a> State<'a> {
@@ -287,6 +292,8 @@ impl<'a> State<'a> {
             light_buffer,
             light_bind_group,
             mouse_pressed: false,
+            last_render_time: Instant::now(),
+            frames: 0,
         }
     }
 
@@ -436,6 +443,16 @@ impl<'a> State<'a> {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
+        self.frames += 1;
+        if self.last_render_time.elapsed().as_secs() >= 1 {
+            self.window().set_title(&format!(
+                "MagicaVox viewier using wgpu, fps: {}",
+                self.frames
+            ));
+            self.last_render_time = Instant::now();
+            self.frames = 0;
+        }
+
         Ok(())
     }
 }
@@ -515,7 +532,10 @@ pub async fn run() {
     }
 
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window = WindowBuilder::new()
+        .with_title("MagicaVox viewier using wgpu")
+        .build(&event_loop)
+        .unwrap();
 
     #[cfg(target_arch = "wasm32")]
     {
