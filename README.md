@@ -16,9 +16,9 @@ Mouse controls:
 - Drop down vox-file on window - Open file, turn camera to models center
 
 Keyboard controls:
-- Left Shift - Move camera up
-- Left Control - Move camera down
-- W/Up - Move camera forward
-- S/Down - Move camera backward
+- W - Move camera forward
+- S - Move camera backward
 - A/Left - Move camera left
 - D/Right - Move camera right
+- Up/Left Shift - Move camera up
+- Down/Left Control - Move camera down

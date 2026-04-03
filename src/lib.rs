@@ -142,7 +142,7 @@ impl<'a> State<'a> {
             0.1,
             10.0 * dimensions.z,
         );
-        let camera_controller = CameraController::new(dimensions.z, 0.4);
+        let camera_controller = CameraController::new(dimensions.z, 2.0);
 
         let light_uniform = light::LightUniform {
             position: dimensions.to_array(),
@@ -384,7 +384,7 @@ impl<'a> State<'a> {
         // Rotate the light
         let old_position: Vec3 = self.light_uniform.position.into();
         self.light_uniform.position =
-            (Quat::from_axis_angle(Vec3::Y, f32::to_radians(1.0)) * old_position).into();
+            (Quat::from_axis_angle(Vec3::Y, f32::to_radians(45.0) * dt.as_secs_f32()) * old_position).into();
         self.queue.write_buffer(
             &self.light_buffer,
             0,
@@ -446,7 +446,7 @@ impl<'a> State<'a> {
         self.frames += 1;
         if self.last_render_time.elapsed().as_secs() >= 1 {
             self.window().set_title(&format!(
-                "MagicaVox viewier using wgpu, fps: {}",
+                "MagicaVox viewer using wgpu, fps: {}",
                 self.frames
             ));
             self.last_render_time = Instant::now();
@@ -533,7 +533,7 @@ pub async fn run() {
 
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new()
-        .with_title("MagicaVox viewier using wgpu")
+        .with_title("MagicaVox viewer using wgpu")
         .build(&event_loop)
         .unwrap();
 

@@ -37,10 +37,6 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    // We don't need (or want) much ambient light, so 0.1 is fine
-    let ambient_strength = 0.1;
-    let ambient_color = light.color * ambient_strength;
-    
     let world_position = model.position + vec4<f32>(instance.position);
     
     out.clip_position = camera.view_projection * world_position;

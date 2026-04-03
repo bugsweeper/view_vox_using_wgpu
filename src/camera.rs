@@ -112,11 +112,11 @@ impl CameraController {
             0.0
         };
         match key {
-            KeyCode::KeyW | KeyCode::ArrowUp => {
+            KeyCode::KeyW => {
                 self.amount_forward = amount;
                 true
             }
-            KeyCode::KeyS | KeyCode::ArrowDown => {
+            KeyCode::KeyS => {
                 self.amount_backward = amount;
                 true
             }
@@ -128,11 +128,11 @@ impl CameraController {
                 self.amount_right = amount;
                 true
             }
-            KeyCode::ShiftLeft => {
+            KeyCode::ShiftLeft | KeyCode::ArrowUp => {
                 self.amount_up = amount;
                 true
             }
-            KeyCode::ControlLeft => {
+            KeyCode::ControlLeft | KeyCode::ArrowDown => {
                 self.amount_down = amount;
                 true
             }
@@ -187,6 +187,6 @@ impl CameraController {
         self.rotate_vertical = 0.0;
 
         // Keep the camera's angle from going too high/low.
-        camera.pitch = camera.pitch.clamp(-consts::FRAC_2_PI, consts::FRAC_2_PI);
+        camera.pitch = camera.pitch.clamp(-consts::FRAC_PI_2, consts::FRAC_PI_2);
     }
 }

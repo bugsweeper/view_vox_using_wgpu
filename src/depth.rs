@@ -1,6 +1,5 @@
 pub struct Texture {
     pub view: wgpu::TextureView,
-    //pub sampler: wgpu::Sampler,
 }
 
 impl Texture {
