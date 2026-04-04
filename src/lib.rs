@@ -8,26 +8,25 @@ use glam::{Quat, Vec3};
 use model::{Instance, Vertex, INDICES, VERTICES};
 use std::{
     f32::consts,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
 use winit::{
-    event::{DeviceEvent, ElementState, Event, KeyEvent, MouseButton, WindowEvent},
-    event_loop::EventLoop,
+    application::ApplicationHandler,
+    event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowBuilder},
+    window::Window,
 };
 
-struct State<'a> {
+struct State {
     #[allow(dead_code)]
     instance: wgpu::Instance,
     #[allow(dead_code)]
     adapter: wgpu::Adapter,
-    surface: wgpu::Surface<'a>,
-    // The window must be declared after the surface so
-    // it gets dropped after it as the surface contains
-    // unsafe references to the window's resources.
-    window: &'a Window,
+    surface: wgpu::Surface<'static>,
+    window: Arc<Window>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -53,55 +52,48 @@ struct State<'a> {
     frames: u16,
 }
 
-impl<'a> State<'a> {
-    // Creating some of the wgpu types requires async code
-    async fn new(window: &'a Window) -> State<'a> {
+impl State {
+    async fn new(window: Arc<Window>) -> State {
         let size = window.inner_size();
 
-        // The instance is a handle to our GPU
-        // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
             backends: wgpu::Backends::GL,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
-        let surface = instance.create_surface(window).unwrap();
+        // Arc<Window> gives Surface<'static> — window stays alive as long as surface does
+        let surface = instance.create_surface(window.clone()).unwrap();
 
-        let adapter = match instance
+        let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
-        {
-            Some(adapter) => adapter,
-            None => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
+            .unwrap_or_else(|_| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
                     compatible_surface: Some(&surface),
-                    force_fallback_adapter: true, // Enable software rendering, slow but fully compatible with any device
-                })
-                .await
-                .unwrap(),
-        };
+                    force_fallback_adapter: true, // software rendering fallback
+                }))
+                .unwrap()
+            });
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::empty(),
-                    // WebGL doesn't support all of wgpu's features, so if
-                    // we're building for the web, we'll have to disable some.
                     required_limits: if cfg!(target_arch = "wasm32") {
                         wgpu::Limits::downlevel_webgl2_defaults()
                     } else {
                         wgpu::Limits::default()
                     },
-                    label: None,
+                    ..Default::default()
                 },
-                None, // Trace path
             )
             .await
             .unwrap();
@@ -232,13 +224,15 @@ impl<'a> State<'a> {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &light_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&light_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
 
         let render_pipeline = {
             let shader = wgpu::include_wgsl!("shader.wgsl");
-
             create_render_pipeline(
                 &device,
                 &render_pipeline_layout,
@@ -252,8 +246,11 @@ impl<'a> State<'a> {
         let light_render_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Light Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &light_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&light_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
             let shader = wgpu::include_wgsl!("light.wgsl");
             create_render_pipeline(
@@ -297,8 +294,8 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn window(&self) -> &Window {
-        self.window
+    fn window(&self) -> &Window {
+        &self.window
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -381,10 +378,11 @@ impl<'a> State<'a> {
             bytemuck::cast_slice(&[CameraUniform::from((&self.camera, &self.projection))]),
         );
 
-        // Rotate the light
         let old_position: Vec3 = self.light_uniform.position.into();
         self.light_uniform.position =
-            (Quat::from_axis_angle(Vec3::Y, f32::to_radians(45.0) * dt.as_secs_f32()) * old_position).into();
+            (Quat::from_axis_angle(Vec3::Y, f32::to_radians(45.0) * dt.as_secs_f32())
+                * old_position)
+                .into();
         self.queue.write_buffer(
             &self.light_buffer,
             0,
@@ -392,8 +390,15 @@ impl<'a> State<'a> {
         );
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
+    fn render(&mut self) -> Result<(), String> {
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Lost => return Err("Lost".into()),
+            wgpu::CurrentSurfaceTexture::Outdated => return Err("Outdated".into()),
+            wgpu::CurrentSurfaceTexture::Timeout => return Err("Timeout".into()),
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(()), // window hidden, skip frame
+            wgpu::CurrentSurfaceTexture::Validation => return Err("Validation".into()),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -409,6 +414,7 @@ impl<'a> State<'a> {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
@@ -424,6 +430,7 @@ impl<'a> State<'a> {
                 }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
@@ -435,11 +442,10 @@ impl<'a> State<'a> {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
 
             render_pass.set_pipeline(&self.light_render_pipeline);
-            // Light cube uses same bind groups and buffers as vox model, which are already set, except it doesn't use `instance_buffer`
+            // Light cube uses same bind groups and buffers, except it doesn't use instance_buffer
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
-        // submit will accept anything that implements IntoIter
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
@@ -472,13 +478,13 @@ fn create_render_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: vertex_layouts,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
                 blend: Some(wgpu::BlendState {
@@ -494,17 +500,14 @@ fn create_render_pipeline(
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: Some(wgpu::Face::Back),
-            // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
             polygon_mode: wgpu::PolygonMode::Fill,
-            // Requires Features::DEPTH_CLIP_CONTROL
             unclipped_depth: false,
-            // Requires Features::CONSERVATIVE_RASTERIZATION
             conservative: false,
         },
         depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
             format,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -513,8 +516,171 @@ fn create_render_pipeline(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
+        cache: None,
     })
+}
+
+struct App {
+    state: Option<State>,
+    last_render_time: Instant,
+    surface_configured: bool,
+    // wasm: State::new is async and can't be awaited inside resumed(),
+    // so spawn_local fills this and window_event picks it up on the next tick.
+    #[cfg(target_arch = "wasm32")]
+    pending_state: std::rc::Rc<std::cell::RefCell<Option<State>>>,
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            state: None,
+            last_render_time: Instant::now(),
+            surface_configured: false,
+            #[cfg(target_arch = "wasm32")]
+            pending_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes().with_title("MagicaVox viewer using wgpu"),
+                )
+                .unwrap(),
+        );
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use winit::dpi::PhysicalSize;
+            use winit::platform::web::WindowExtWebSys;
+
+            web_sys::window()
+                .and_then(|win| win.document())
+                .and_then(|doc| {
+                    let dst = doc.get_element_by_id("canvas")?;
+                    let canvas = web_sys::Element::from(window.canvas()?);
+                    dst.append_child(&canvas).ok()?;
+                    Some(())
+                })
+                .expect("Couldn't append canvas to document body.");
+            let _ = window.request_inner_size(PhysicalSize::new(450, 400));
+
+            let pending = self.pending_state.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let state = State::new(window).await;
+                *pending.borrow_mut() = Some(state);
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.state = Some(pollster::block_on(State::new(window)));
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        // wasm: promote pending state once async init completes
+        #[cfg(target_arch = "wasm32")]
+        if self.state.is_none() {
+            self.state = self.pending_state.borrow_mut().take();
+        }
+
+        if self
+            .state
+            .as_ref()
+            .map_or(true, |s| s.window().id() != window_id)
+        {
+            return;
+        }
+
+        if self.state.as_mut().unwrap().input(&event) {
+            return;
+        }
+
+        match event {
+            #[cfg(not(target_arch = "wasm32"))]
+            WindowEvent::CloseRequested => event_loop.exit(),
+            #[cfg(not(target_arch = "wasm32"))]
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => event_loop.exit(),
+            WindowEvent::Resized(physical_size) => {
+                log::info!("physical_size: {physical_size:?}");
+                self.surface_configured = true;
+                self.state.as_mut().unwrap().resize(physical_size);
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                let size = self.state.as_ref().unwrap().window().inner_size();
+                self.state.as_mut().unwrap().resize(size);
+            }
+            WindowEvent::RedrawRequested => {
+                if !self.surface_configured {
+                    return;
+                }
+
+                let now = Instant::now();
+                let dt = now - self.last_render_time;
+                self.last_render_time = now;
+                self.state.as_mut().unwrap().update(dt);
+
+                match self.state.as_mut().unwrap().render() {
+                    Ok(()) => {}
+                    Err(e) if e == "Lost" || e == "Outdated" => {
+                        let size = self.state.as_ref().unwrap().size;
+                        self.state.as_mut().unwrap().resize(size);
+                    }
+                    Err(e) if e == "Timeout" => {
+                        log::warn!("Surface timeout");
+                    }
+                    Err(e) => {
+                        log::error!("Render error: {e}");
+                        event_loop.exit();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            state.window().request_redraw();
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(state) = &mut self.state {
+                if state.mouse_pressed {
+                    state.camera_controller.process_mouse(delta.0, delta.1);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -532,103 +698,14 @@ pub async fn run() {
     }
 
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new()
-        .with_title("MagicaVox viewer using wgpu")
-        .build(&event_loop)
-        .unwrap();
+    let mut app = App::new();
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        // Winit prevents sizing with CSS, so we have to set
-        // the size manually when on web.
-        use winit::dpi::PhysicalSize;
-
-        use winit::platform::web::WindowExtWebSys;
-        web_sys::window()
-            .and_then(|win| win.document())
-            .and_then(|doc| {
-                let dst = doc.get_element_by_id("canvas")?;
-                let canvas = web_sys::Element::from(window.canvas()?);
-                dst.append_child(&canvas).ok()?;
-                Some(())
-            })
-            .expect("Couldn't append canvas to document body.");
-
-        let _ = window.request_inner_size(PhysicalSize::new(450, 400));
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "wasm32")] {
+            use winit::platform::web::EventLoopExtWebSys;
+            event_loop.spawn_app(app);
+        } else {
+            event_loop.run_app(&mut app).unwrap();
+        }
     }
-
-    let mut state = State::new(&window).await;
-    let mut surface_configured = false;
-    let mut last_render_time = std::time::Instant::now();
-
-    event_loop
-        .run(move |event, control_flow| match event {
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion{ delta, },
-                .. // We're not using device_id currently
-            } => if state.mouse_pressed {
-                state.camera_controller.process_mouse(delta.0, delta.1);
-            }
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == state.window().id() => {
-                if !state.input(event) {
-                    match event {
-                        #[cfg(not(target_arch="wasm32"))]
-                        WindowEvent::CloseRequested
-                        | WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    state: ElementState::Pressed,
-                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                                    ..
-                                },
-                            ..
-                        } => control_flow.exit(),
-                        WindowEvent::Resized(physical_size) => {
-                            log::info!("physical_size: {physical_size:?}");
-                            surface_configured = true;
-                            state.resize(*physical_size);
-                        }
-                        WindowEvent::ScaleFactorChanged { .. } => {
-                            state.resize(state.window().inner_size());
-                        }
-                        WindowEvent::RedrawRequested => {
-                            // This tells winit that we want another frame after this one
-                            state.window().request_redraw();
-
-                            if !surface_configured {
-                                return;
-                            }
-
-                            let now = std::time::Instant::now();
-                            let dt = now - last_render_time;
-                            last_render_time = now;
-                            state.update(dt);
-
-                            match state.render() {
-                                Ok(()) => {}
-                                // Reconfigure the surface if it's lost or outdated
-                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                                    state.resize(state.size);
-                                }
-                                // The system is out of memory, we should probably quit
-                                Err(wgpu::SurfaceError::OutOfMemory) => {
-                                    log::error!("OutOfMemory");
-                                    control_flow.exit();
-                                }
-                                // This happens when the a frame takes too long to present
-                                Err(wgpu::SurfaceError::Timeout) => {
-                                    log::warn!("Surface timeout");
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        })
-        .unwrap();
 }
