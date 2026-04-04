@@ -124,8 +124,16 @@ impl State {
         let depth_texture = depth::Texture::create_depth_texture(&device, &config, "depth_texture");
 
         let vox_path = std::env::args().nth(1);
-        let (instances, dimensions) =
-            model::vox::load(vox_path.as_deref().unwrap_or("assets/snow.vox"));
+        let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
+        let (instances, dimensions) = match model::vox::load(initial_path) {
+            Ok(scene) => scene,
+            Err(e) => {
+                // Non-zero exit so the shell can detect failure; eprintln goes
+                // to stderr before the logger is necessarily flushed.
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        };
 
         let camera = OrbitCamera {
             target: dimensions / 2.0,
@@ -381,8 +389,10 @@ impl State {
                     .map_or(false, |ext| ext.eq_ignore_ascii_case("vox"))
                 {
                     if let Some(path) = path_buf.as_os_str().to_str() {
-                        let (instances, dimensions) = model::vox::load(path);
-                        self.apply_scene(instances, dimensions);
+                        match model::vox::load(path) {
+                            Ok((instances, dimensions)) => self.apply_scene(instances, dimensions),
+                            Err(e) => log::error!("Failed to load {path}: {e}"),
+                        }
                         return true;
                     }
                     log::warn!("could not read path {path_buf:?}");
