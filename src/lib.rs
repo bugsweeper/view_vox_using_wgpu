@@ -40,7 +40,7 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    instances: Vec<Instance>,
+    instance_count: u32,
     instance_buffer: wgpu::Buffer,
     depth_texture: depth::Texture,
     camera: OrbitCamera,
@@ -53,8 +53,12 @@ struct State {
     light_bind_group: wgpu::BindGroup,
     orbit_pressed: bool,
     pan_pressed: bool,
-    last_render_time: Instant,
-    frames: u16,
+    fps_counter: FpsCounter,
+}
+
+struct FpsCounter {
+    last_tick: Instant,
+    frames: u32,
 }
 
 impl State {
@@ -92,7 +96,7 @@ impl State {
             vertex_buffer: buffers.vertex_buffer,
             index_buffer: buffers.index_buffer,
             num_indices: buffers.num_indices,
-            instances,
+            instance_count: instances.len() as u32,
             instance_buffer: buffers.instance_buffer,
             depth_texture,
             camera,
@@ -105,8 +109,7 @@ impl State {
             light_bind_group: bind_groups.light_bind_group,
             orbit_pressed: false,
             pan_pressed: false,
-            last_render_time: Instant::now(),
-            frames: 0,
+            fps_counter: FpsCounter { last_tick: Instant::now(), frames: 0 },
         }
     }
 
@@ -115,15 +118,14 @@ impl State {
     }
 
     fn apply_scene(&mut self, instances: Vec<Instance>, dimensions: Vec3) {
-        let instance_buffer = self
+        self.instance_count = instances.len() as u32;
+        self.instance_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Instance Buffer"),
                 contents: bytemuck::cast_slice(&instances),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        self.instances = instances;
-        self.instance_buffer = instance_buffer;
 
         self.camera = OrbitCamera {
             target: dimensions / 2.0,
@@ -274,7 +276,7 @@ impl State {
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instance_count);
 
             render_pass.set_pipeline(&self.light_render_pipeline);
             // Light cube uses same bind groups and buffers, except it doesn't use instance_buffer
@@ -284,14 +286,14 @@ impl State {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        self.frames += 1;
-        if self.last_render_time.elapsed().as_secs() >= 1 {
+        self.fps_counter.frames += 1;
+        if self.fps_counter.last_tick.elapsed().as_secs() >= 1 {
             self.window().set_title(&format!(
                 "MagicaVox viewer using wgpu, fps: {}",
-                self.frames
+                self.fps_counter.frames
             ));
-            self.last_render_time = Instant::now();
-            self.frames = 0;
+            self.fps_counter.last_tick = Instant::now();
+            self.fps_counter.frames = 0;
         }
 
         Ok(())
