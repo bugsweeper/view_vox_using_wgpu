@@ -59,250 +59,50 @@ struct State {
 
 impl State {
     async fn new(window: Arc<Window>) -> State {
-        let size = window.inner_size();
+        let gpu = init_gpu(window.clone()).await;
+        let depth_texture =
+            depth::Texture::create_depth_texture(&gpu.device, &gpu.config, "depth_texture");
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::PRIMARY,
-            #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::GL,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let (instances, dimensions) = load_initial_scene();
+        let (camera, projection, camera_controller) =
+            init_camera(dimensions, gpu.config.width, gpu.config.height);
 
-        // Arc<Window> gives Surface<'static> — window stays alive as long as surface does
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .unwrap_or_else(|_| {
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::default(),
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: true, // software rendering fallback
-                }))
-                .unwrap()
-            });
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    },
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        let depth_texture = depth::Texture::create_depth_texture(&device, &config, "depth_texture");
-
-        let vox_path = std::env::args().nth(1);
-        let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
-        let (instances, dimensions) = match model::vox::load(initial_path) {
-            Ok(scene) => scene,
-            Err(e) => {
-                // Non-zero exit so the shell can detect failure; eprintln goes
-                // to stderr before the logger is necessarily flushed.
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let camera = OrbitCamera {
-            target: dimensions / 2.0,
-            distance: dimensions.z * 2.0,
-            yaw: -consts::FRAC_PI_2,
-            pitch: consts::FRAC_PI_6,
-        };
-        let projection = Projection::new(
-            config.width,
-            config.height,
-            consts::FRAC_PI_4,
-            0.1,
-            10.0 * dimensions.z,
+        let buffers =
+            create_buffers(&gpu.device, &instances, &camera, &projection, dimensions);
+        let bind_groups =
+            create_bind_groups(&gpu.device, &buffers.camera_buffer, &buffers.light_buffer);
+        let pipelines = create_pipelines(
+            &gpu.device,
+            gpu.config.format,
+            &bind_groups.camera_layout,
+            &bind_groups.light_layout,
         );
-        let camera_controller =
-            OrbitController::new(ORBIT_SENSITIVITY, PAN_SENSITIVITY, ZOOM_SENSITIVITY);
-
-        let light_uniform = light::LightUniform {
-            position: dimensions.to_array(),
-            _padding: 0,
-            color: [1.0, 1.0, 1.0],
-            _padding2: 0,
-        };
-        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Light VB"),
-            contents: bytemuck::cast_slice(&[light_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let num_indices = INDICES.len() as u32;
-
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instances),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[CameraUniform::from((&camera, &projection))]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("camera_bind_group_layout"),
-            });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-
-        let light_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: None,
-            });
-
-        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
-            label: None,
-        });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[
-                    Some(&camera_bind_group_layout),
-                    Some(&light_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
-
-        let render_pipeline = {
-            let shader = wgpu::include_wgsl!("shader.wgsl");
-            create_render_pipeline(
-                &device,
-                &render_pipeline_layout,
-                config.format,
-                Some(depth::Texture::DEPTH_FORMAT),
-                &[Vertex::desc(), Instance::desc()],
-                shader,
-            )
-        };
-
-        let light_render_pipeline = {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Light Pipeline Layout"),
-                bind_group_layouts: &[
-                    Some(&camera_bind_group_layout),
-                    Some(&light_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
-            let shader = wgpu::include_wgsl!("light.wgsl");
-            create_render_pipeline(
-                &device,
-                &layout,
-                config.format,
-                Some(depth::Texture::DEPTH_FORMAT),
-                &[Vertex::desc()],
-                shader,
-            )
-        };
 
         Self {
-            instance,
-            adapter,
+            instance: gpu.instance,
+            adapter: gpu.adapter,
+            surface: gpu.surface,
             window,
-            surface,
-            device,
-            queue,
-            config,
-            size,
-            render_pipeline,
-            light_render_pipeline,
-            vertex_buffer,
-            index_buffer,
-            num_indices,
+            device: gpu.device,
+            queue: gpu.queue,
+            config: gpu.config,
+            size: gpu.size,
+            render_pipeline: pipelines.render_pipeline,
+            light_render_pipeline: pipelines.light_render_pipeline,
+            vertex_buffer: buffers.vertex_buffer,
+            index_buffer: buffers.index_buffer,
+            num_indices: buffers.num_indices,
             instances,
-            instance_buffer,
+            instance_buffer: buffers.instance_buffer,
             depth_texture,
             camera,
             projection,
             camera_controller,
-            camera_buffer,
-            camera_bind_group,
-            light_uniform,
-            light_buffer,
-            light_bind_group,
+            camera_buffer: buffers.camera_buffer,
+            camera_bind_group: bind_groups.camera_bind_group,
+            light_uniform: buffers.light_uniform,
+            light_buffer: buffers.light_buffer,
+            light_bind_group: bind_groups.light_bind_group,
             orbit_pressed: false,
             pan_pressed: false,
             last_render_time: Instant::now(),
@@ -496,6 +296,258 @@ impl State {
 
         Ok(())
     }
+}
+
+// Initialization helpers
+
+struct GpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    size: winit::dpi::PhysicalSize<u32>,
+}
+
+struct SceneBuffers {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+    instance_buffer: wgpu::Buffer,
+    camera_buffer: wgpu::Buffer,
+    light_uniform: light::LightUniform,
+    light_buffer: wgpu::Buffer,
+}
+
+struct BindGroups {
+    camera_layout: wgpu::BindGroupLayout,
+    camera_bind_group: wgpu::BindGroup,
+    light_layout: wgpu::BindGroupLayout,
+    light_bind_group: wgpu::BindGroup,
+}
+
+struct Pipelines {
+    render_pipeline: wgpu::RenderPipeline,
+    light_render_pipeline: wgpu::RenderPipeline,
+}
+
+async fn init_gpu(window: Arc<Window>) -> GpuContext {
+    let size = window.inner_size();
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        #[cfg(not(target_arch = "wasm32"))]
+        backends: wgpu::Backends::PRIMARY,
+        #[cfg(target_arch = "wasm32")]
+        backends: wgpu::Backends::GL,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+
+    // Arc<Window> gives Surface<'static> — window stays alive as long as surface does
+    let surface = instance.create_surface(window).unwrap();
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        })
+        .await
+        .unwrap_or_else(|_| {
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: true, // software rendering fallback
+            }))
+            .unwrap()
+        });
+
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: if cfg!(target_arch = "wasm32") {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let surface_caps = surface.get_capabilities(&adapter);
+    let surface_format = surface_caps
+        .formats
+        .iter()
+        .find(|f| f.is_srgb())
+        .copied()
+        .unwrap_or(surface_caps.formats[0]);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width,
+        height: size.height,
+        present_mode: surface_caps.present_modes[0],
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &config);
+
+    GpuContext { instance, adapter, surface, device, queue, config, size }
+}
+
+fn load_initial_scene() -> (Vec<Instance>, Vec3) {
+    let vox_path = std::env::args().nth(1);
+    let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
+    match model::vox::load(initial_path) {
+        Ok(scene) => scene,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn init_camera(dimensions: Vec3, width: u32, height: u32) -> (OrbitCamera, Projection, OrbitController) {
+    let camera = OrbitCamera {
+        target: dimensions / 2.0,
+        distance: dimensions.z * 2.0,
+        yaw: -consts::FRAC_PI_2,
+        pitch: consts::FRAC_PI_6,
+    };
+    let projection = Projection::new(width, height, consts::FRAC_PI_4, 0.1, 10.0 * dimensions.z);
+    let controller = OrbitController::new(ORBIT_SENSITIVITY, PAN_SENSITIVITY, ZOOM_SENSITIVITY);
+    (camera, projection, controller)
+}
+
+fn create_buffers(
+    device: &wgpu::Device,
+    instances: &[Instance],
+    camera: &OrbitCamera,
+    projection: &Projection,
+    dimensions: Vec3,
+) -> SceneBuffers {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Vertex Buffer"),
+        contents: bytemuck::cast_slice(VERTICES),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Index Buffer"),
+        contents: bytemuck::cast_slice(INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let num_indices = INDICES.len() as u32;
+    let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Instance Buffer"),
+        contents: bytemuck::cast_slice(instances),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Camera Buffer"),
+        contents: bytemuck::cast_slice(&[CameraUniform::from((camera, projection))]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let light_uniform = light::LightUniform {
+        position: dimensions.to_array(),
+        _padding: 0,
+        color: [1.0, 1.0, 1.0],
+        _padding2: 0,
+    };
+    let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Light VB"),
+        contents: bytemuck::cast_slice(&[light_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    SceneBuffers { vertex_buffer, index_buffer, num_indices, instance_buffer, camera_buffer, light_uniform, light_buffer }
+}
+
+fn create_bind_groups(
+    device: &wgpu::Device,
+    camera_buffer: &wgpu::Buffer,
+    light_buffer: &wgpu::Buffer,
+) -> BindGroups {
+    let uniform_layout_entry = wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+
+    let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[uniform_layout_entry],
+        label: Some("camera_bind_group_layout"),
+    });
+    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &camera_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }],
+        label: Some("camera_bind_group"),
+    });
+
+    let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[uniform_layout_entry],
+        label: Some("light_bind_group_layout"),
+    });
+    let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &light_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: light_buffer.as_entire_binding(),
+        }],
+        label: Some("light_bind_group"),
+    });
+
+    BindGroups { camera_layout, camera_bind_group, light_layout, light_bind_group }
+}
+
+fn create_pipelines(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+    light_layout: &wgpu::BindGroupLayout,
+) -> Pipelines {
+    let bind_group_layouts = &[Some(camera_layout), Some(light_layout)];
+
+    let main_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Render Pipeline Layout"),
+        bind_group_layouts,
+        immediate_size: 0,
+    });
+    let render_pipeline = create_render_pipeline(
+        device,
+        &main_layout,
+        color_format,
+        Some(depth::Texture::DEPTH_FORMAT),
+        &[Vertex::desc(), Instance::desc()],
+        wgpu::include_wgsl!("shader.wgsl"),
+    );
+
+    let light_layout_desc = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Light Pipeline Layout"),
+        bind_group_layouts,
+        immediate_size: 0,
+    });
+    let light_render_pipeline = create_render_pipeline(
+        device,
+        &light_layout_desc,
+        color_format,
+        Some(depth::Texture::DEPTH_FORMAT),
+        &[Vertex::desc()],
+        wgpu::include_wgsl!("light.wgsl"),
+    );
+
+    Pipelines { render_pipeline, light_render_pipeline }
 }
 
 fn create_render_pipeline(
