@@ -3,7 +3,7 @@ mod depth;
 mod light;
 mod model;
 
-use camera::{Camera, CameraController, CameraUniform, Projection};
+use camera::{CameraUniform, OrbitCamera, OrbitController, Projection};
 use glam::{Quat, Vec3};
 use model::{Instance, Vertex, INDICES, VERTICES};
 use std::{
@@ -19,6 +19,10 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
+
+const ORBIT_SENSITIVITY: f32 = 0.003;
+const PAN_SENSITIVITY: f32 = 0.001;
+const ZOOM_SENSITIVITY: f32 = 0.1;
 
 struct State {
     #[allow(dead_code)]
@@ -39,15 +43,16 @@ struct State {
     instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
     depth_texture: depth::Texture,
-    camera: Camera,
+    camera: OrbitCamera,
     projection: Projection,
-    camera_controller: CameraController,
+    camera_controller: OrbitController,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
-    mouse_pressed: bool,
+    orbit_pressed: bool,
+    pan_pressed: bool,
     last_render_time: Instant,
     frames: u16,
 }
@@ -122,10 +127,11 @@ impl State {
         let (instances, dimensions) =
             model::vox::load(vox_path.as_deref().unwrap_or("assets/snow.vox"));
 
-        let camera = Camera {
-            position: dimensions / 2.0 + Vec3::ZERO.with_z(dimensions.z * 2.0),
+        let camera = OrbitCamera {
+            target: dimensions / 2.0,
+            distance: dimensions.z * 2.0,
             yaw: -consts::FRAC_PI_2,
-            pitch: 0.0,
+            pitch: consts::FRAC_PI_6,
         };
         let projection = Projection::new(
             config.width,
@@ -134,7 +140,8 @@ impl State {
             0.1,
             10.0 * dimensions.z,
         );
-        let camera_controller = CameraController::new(dimensions.z, 2.0);
+        let camera_controller =
+            OrbitController::new(ORBIT_SENSITIVITY, PAN_SENSITIVITY, ZOOM_SENSITIVITY);
 
         let light_uniform = light::LightUniform {
             position: dimensions.to_array(),
@@ -288,7 +295,8 @@ impl State {
             light_uniform,
             light_buffer,
             light_bind_group,
-            mouse_pressed: false,
+            orbit_pressed: false,
+            pan_pressed: false,
             last_render_time: Instant::now(),
             frames: 0,
         }
@@ -296,6 +304,32 @@ impl State {
 
     fn window(&self) -> &Window {
         &self.window
+    }
+
+    fn apply_scene(&mut self, instances: Vec<Instance>, dimensions: Vec3) {
+        let instance_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instances),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.instances = instances;
+        self.instance_buffer = instance_buffer;
+
+        self.camera = OrbitCamera {
+            target: dimensions / 2.0,
+            distance: dimensions.z * 2.0,
+            yaw: -consts::FRAC_PI_2,
+            pitch: consts::FRAC_PI_6,
+        };
+        self.projection.set_z_far(10.0 * dimensions.z);
+        self.light_uniform.position = dimensions.to_array();
+        self.queue.write_buffer(
+            &self.light_buffer,
+            0,
+            bytemuck::cast_slice(&[self.light_uniform]),
+        );
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -330,7 +364,15 @@ impl State {
                 state,
                 ..
             } => {
-                self.mouse_pressed = *state == ElementState::Pressed;
+                self.orbit_pressed = *state == ElementState::Pressed;
+                true
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Right,
+                state,
+                ..
+            } => {
+                self.pan_pressed = *state == ElementState::Pressed;
                 true
             }
             WindowEvent::DroppedFile(path_buf) => {
@@ -339,25 +381,8 @@ impl State {
                     .map_or(false, |ext| ext.eq_ignore_ascii_case("vox"))
                 {
                     if let Some(path) = path_buf.as_os_str().to_str() {
-                        let (mut instances, dimensions) = model::vox::load(path);
-
-                        let mut instance_buffer =
-                            self.device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some("Instance Buffer"),
-                                    contents: bytemuck::cast_slice(&instances),
-                                    usage: wgpu::BufferUsages::VERTEX,
-                                });
-
-                        std::mem::swap(&mut self.instances, &mut instances);
-                        std::mem::swap(&mut self.instance_buffer, &mut instance_buffer);
-
-                        self.camera = Camera {
-                            position: dimensions / 2.0 + Vec3::ZERO.with_z(dimensions.z * 2.0),
-                            yaw: -consts::FRAC_PI_2,
-                            pitch: 0.0,
-                        };
-
+                        let (instances, dimensions) = model::vox::load(path);
+                        self.apply_scene(instances, dimensions);
                         return true;
                     }
                     log::warn!("could not read path {path_buf:?}");
@@ -525,8 +550,12 @@ struct App {
     state: Option<State>,
     last_render_time: Instant,
     surface_configured: bool,
-    // wasm: State::new is async and can't be awaited inside resumed(),
-    // so spawn_local fills this and window_event picks it up on the next tick.
+    // wasm: State::new is async and can't be awaited inside resumed().
+    // We keep the window separately so about_to_wait can request redraws while
+    // State is still initializing, ensuring window_event is called to pick up
+    // pending_state once spawn_local completes.
+    #[cfg(target_arch = "wasm32")]
+    window: Option<Arc<Window>>,
     #[cfg(target_arch = "wasm32")]
     pending_state: std::rc::Rc<std::cell::RefCell<Option<State>>>,
 }
@@ -537,6 +566,8 @@ impl App {
             state: None,
             last_render_time: Instant::now(),
             surface_configured: false,
+            #[cfg(target_arch = "wasm32")]
+            window: None,
             #[cfg(target_arch = "wasm32")]
             pending_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
@@ -573,6 +604,7 @@ impl ApplicationHandler for App {
                 .expect("Couldn't append canvas to document body.");
             let _ = window.request_inner_size(PhysicalSize::new(450, 400));
 
+            self.window = Some(window.clone());
             let pending = self.pending_state.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let state = State::new(window).await;
@@ -664,6 +696,12 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = &self.state {
             state.window().request_redraw();
+        } else {
+            // wasm: keep ticking so window_event is called to pick up pending_state
+            #[cfg(target_arch = "wasm32")]
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
     }
 
@@ -675,8 +713,10 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if let Some(state) = &mut self.state {
-                if state.mouse_pressed {
-                    state.camera_controller.process_mouse(delta.0, delta.1);
+                if state.orbit_pressed {
+                    state.camera_controller.process_orbit(delta.0, delta.1);
+                } else if state.pan_pressed {
+                    state.camera_controller.process_pan(delta.0, delta.1);
                 }
             }
         }

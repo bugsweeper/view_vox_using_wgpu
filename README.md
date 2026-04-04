@@ -25,14 +25,12 @@ WAYLAND_DISPLAY="" cargo run -- path/to/model.vox
 ## Controls
 
 Mouse controls:
-- Left Mouse - Rotate camera
+- Left Mouse drag - Orbit around model
+- Right Mouse drag - Pan
 - Scroll Wheel - Zoom
-- Drop down vox-file on window - Open file, turn camera to models center
+- Drop vox-file on window - Open file, reset camera to model center
 
 Keyboard controls:
-- W - Move camera forward
-- S - Move camera backward
-- A/Left - Move camera left
-- D/Right - Move camera right
-- Up/Left Shift - Move camera up
-- Down/Left Control - Move camera down
+- W/S/A/D - Orbit
+- Arrow keys - Pan
+- Left Shift / Left Control - Zoom in / out
