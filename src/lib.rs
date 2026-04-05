@@ -5,7 +5,7 @@ mod model;
 
 use camera::{CameraUniform, OrbitCamera, OrbitController, Projection};
 use glam::{Quat, Vec3};
-use model::{Instance, Vertex, INDICES, VERTICES};
+use model::{LightVertex, Vertex, LIGHT_CUBE_INDICES, LIGHT_CUBE_VERTICES};
 use std::{
     f32::consts,
     sync::Arc,
@@ -40,8 +40,9 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    instance_count: u32,
-    instance_buffer: wgpu::Buffer,
+    light_vertex_buffer: wgpu::Buffer,
+    light_index_buffer: wgpu::Buffer,
+    light_num_indices: u32,
     depth_texture: depth::Texture,
     camera: OrbitCamera,
     projection: Projection,
@@ -67,12 +68,12 @@ impl State {
         let depth_texture =
             depth::Texture::create_depth_texture(&gpu.device, &gpu.config, "depth_texture");
 
-        let (instances, dimensions) = load_initial_scene();
+        let (mesh, dimensions) = load_initial_scene();
         let (camera, projection, camera_controller) =
             init_camera(dimensions, gpu.config.width, gpu.config.height);
 
         let buffers =
-            create_buffers(&gpu.device, &instances, &camera, &projection, dimensions);
+            create_buffers(&gpu.device, &mesh, &camera, &projection, dimensions);
         let bind_groups =
             create_bind_groups(&gpu.device, &buffers.camera_buffer, &buffers.light_buffer);
         let pipelines = create_pipelines(
@@ -96,8 +97,9 @@ impl State {
             vertex_buffer: buffers.vertex_buffer,
             index_buffer: buffers.index_buffer,
             num_indices: buffers.num_indices,
-            instance_count: instances.len() as u32,
-            instance_buffer: buffers.instance_buffer,
+            light_vertex_buffer: buffers.light_vertex_buffer,
+            light_index_buffer: buffers.light_index_buffer,
+            light_num_indices: buffers.light_num_indices,
             depth_texture,
             camera,
             projection,
@@ -117,14 +119,21 @@ impl State {
         &self.window
     }
 
-    fn apply_scene(&mut self, instances: Vec<Instance>, dimensions: Vec3) {
-        self.instance_count = instances.len() as u32;
-        self.instance_buffer = self
+    fn apply_scene(&mut self, mesh: model::Mesh, dimensions: Vec3) {
+        self.num_indices = mesh.indices.len() as u32;
+        self.vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instances),
+                label: Some("Vertex Buffer"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
             });
 
         self.camera = OrbitCamera {
@@ -192,7 +201,7 @@ impl State {
                 {
                     if let Some(path) = path_buf.as_os_str().to_str() {
                         match model::vox::load(path) {
-                            Ok((instances, dimensions)) => self.apply_scene(instances, dimensions),
+                            Ok((mesh, dimensions)) => self.apply_scene(mesh, dimensions),
                             Err(e) => log::error!("Failed to load {path}: {e}"),
                         }
                         return true;
@@ -274,13 +283,13 @@ impl State {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(1, &self.light_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instance_count);
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
 
             render_pass.set_pipeline(&self.light_render_pipeline);
-            // Light cube uses same bind groups and buffers, except it doesn't use instance_buffer
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            render_pass.set_vertex_buffer(0, self.light_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.light_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.light_num_indices, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -316,7 +325,9 @@ struct SceneBuffers {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    instance_buffer: wgpu::Buffer,
+    light_vertex_buffer: wgpu::Buffer,
+    light_index_buffer: wgpu::Buffer,
+    light_num_indices: u32,
     camera_buffer: wgpu::Buffer,
     light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
@@ -401,7 +412,7 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
     GpuContext { instance, adapter, surface, device, queue, config, size }
 }
 
-fn load_initial_scene() -> (Vec<Instance>, Vec3) {
+fn load_initial_scene() -> (model::Mesh, Vec3) {
     let vox_path = std::env::args().nth(1);
     let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
     match model::vox::load(initial_path) {
@@ -427,27 +438,33 @@ fn init_camera(dimensions: Vec3, width: u32, height: u32) -> (OrbitCamera, Proje
 
 fn create_buffers(
     device: &wgpu::Device,
-    instances: &[Instance],
+    mesh: &model::Mesh,
     camera: &OrbitCamera,
     projection: &Projection,
     dimensions: Vec3,
 ) -> SceneBuffers {
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Vertex Buffer"),
-        contents: bytemuck::cast_slice(VERTICES),
+        contents: bytemuck::cast_slice(&mesh.vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
     let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Index Buffer"),
-        contents: bytemuck::cast_slice(INDICES),
+        contents: bytemuck::cast_slice(&mesh.indices),
         usage: wgpu::BufferUsages::INDEX,
     });
-    let num_indices = INDICES.len() as u32;
-    let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Instance Buffer"),
-        contents: bytemuck::cast_slice(instances),
+    let num_indices = mesh.indices.len() as u32;
+    let light_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Light Vertex Buffer"),
+        contents: bytemuck::cast_slice(LIGHT_CUBE_VERTICES),
         usage: wgpu::BufferUsages::VERTEX,
     });
+    let light_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Light Index Buffer"),
+        contents: bytemuck::cast_slice(LIGHT_CUBE_INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let light_num_indices = LIGHT_CUBE_INDICES.len() as u32;
     let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Camera Buffer"),
         contents: bytemuck::cast_slice(&[CameraUniform::from((camera, projection))]),
@@ -465,7 +482,7 @@ fn create_buffers(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    SceneBuffers { vertex_buffer, index_buffer, num_indices, instance_buffer, camera_buffer, light_uniform, light_buffer }
+    SceneBuffers { vertex_buffer, index_buffer, num_indices, light_vertex_buffer, light_index_buffer, light_num_indices, camera_buffer, light_uniform, light_buffer }
 }
 
 fn create_bind_groups(
@@ -531,7 +548,7 @@ fn create_pipelines(
         &main_layout,
         color_format,
         Some(depth::Texture::DEPTH_FORMAT),
-        &[Vertex::desc(), Instance::desc()],
+        &[Vertex::desc()],
         wgpu::include_wgsl!("shader.wgsl"),
     );
 
@@ -545,7 +562,7 @@ fn create_pipelines(
         &light_layout_desc,
         color_format,
         Some(depth::Texture::DEPTH_FORMAT),
-        &[Vertex::desc()],
+        &[LightVertex::desc()],
         wgpu::include_wgsl!("light.wgsl"),
     );
 

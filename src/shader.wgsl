@@ -9,11 +9,7 @@ var<uniform> camera: CameraUniform;
 struct VertexInput {
     @location(0) position: vec4<f32>,
     @location(1) normal: vec4<f32>,
-};
-
-struct InstanceInput {
-    @location(2) position: vec4<u32>,
-    @location(3) color: vec4<f32>,
+    @location(2) color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -31,18 +27,12 @@ struct Light {
 var<uniform> light: Light;
 
 @vertex
-fn vs_main(
-    model: VertexInput,
-    instance: InstanceInput,
-) -> VertexOutput {
+fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-
-    let world_position = model.position + vec4<f32>(instance.position);
-    
-    out.clip_position = camera.view_projection * world_position;
-    out.color = instance.color;
+    out.clip_position = camera.view_projection * model.position;
+    out.color = model.color;
     out.world_normal = model.normal.xyz;
-    out.world_position = world_position.xyz;
+    out.world_position = model.position.xyz;
     return out;
 }
 

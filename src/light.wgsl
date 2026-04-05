@@ -13,7 +13,7 @@ struct Light {
 var<uniform> light: Light;
 
 struct VertexInput {
-    @location(0) position: vec3<f32>,
+    @location(0) position: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -27,7 +27,7 @@ fn vs_main(
 ) -> VertexOutput {
     let scale = 2.0;
     var out: VertexOutput;
-    out.clip_position = camera.view_projection * vec4<f32>(model.position * scale + light.position, 1.0);
+    out.clip_position = camera.view_projection * vec4<f32>(model.position.xyz * scale + light.position, 1.0);
     out.color = light.color;
     return out;
 }
