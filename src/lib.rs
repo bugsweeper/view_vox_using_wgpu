@@ -8,7 +8,7 @@ use glam::{Quat, Vec3};
 use model::{LightVertex, Vertex, LIGHT_CUBE_INDICES, LIGHT_CUBE_VERTICES};
 use std::{
     f32::consts,
-    sync::Arc,
+    sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 use wgpu::util::DeviceExt;
@@ -55,6 +55,8 @@ struct State {
     orbit_pressed: bool,
     pan_pressed: bool,
     fps_counter: FpsCounter,
+    #[cfg(not(target_arch = "wasm32"))]
+    load_receiver: Option<mpsc::Receiver<Result<(model::Mesh, Vec3), model::vox::LoadError>>>,
 }
 
 struct FpsCounter {
@@ -64,10 +66,29 @@ struct FpsCounter {
 
 impl State {
     async fn new(window: Arc<Window>) -> State {
+        // Kick off file loading before GPU init so they run in parallel.
+        #[cfg(not(target_arch = "wasm32"))]
+        let initial_load_rx = {
+            let (tx, rx) = mpsc::channel();
+            let vox_path = std::env::args().nth(1);
+            std::thread::spawn(move || {
+                let path = vox_path.as_deref().unwrap_or("assets/snow.vox").to_owned();
+                let _ = tx.send(model::vox::load(&path));
+            });
+            rx
+        };
+
         let gpu = init_gpu(window.clone()).await;
         let depth_texture =
             depth::Texture::create_depth_texture(&gpu.device, &gpu.config, "depth_texture");
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let (mesh, dimensions) = match initial_load_rx.recv() {
+            Ok(Ok(scene)) => scene,
+            Ok(Err(e)) => { eprintln!("Error: {e}"); std::process::exit(1); }
+            Err(_) => { eprintln!("Error: load thread panicked"); std::process::exit(1); }
+        };
+        #[cfg(target_arch = "wasm32")]
         let (mesh, dimensions) = load_initial_scene();
         let (camera, projection, camera_controller) =
             init_camera(dimensions, gpu.config.width, gpu.config.height);
@@ -112,6 +133,8 @@ impl State {
             orbit_pressed: false,
             pan_pressed: false,
             fps_counter: FpsCounter { last_tick: Instant::now(), frames: 0 },
+            #[cfg(not(target_arch = "wasm32"))]
+            load_receiver: None,
         }
     }
 
@@ -200,6 +223,22 @@ impl State {
                     .map_or(false, |ext| ext.eq_ignore_ascii_case("vox"))
                 {
                     if let Some(path) = path_buf.as_os_str().to_str() {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if self.load_receiver.is_some() {
+                                log::warn!("Ignoring drop of {path}: previous load still in progress");
+                            } else {
+                                let path = path.to_owned();
+                                let (tx, rx) = mpsc::channel();
+                                self.load_receiver = Some(rx);
+                                std::thread::spawn(move || {
+                                    let _ = tx.send(model::vox::load(&path));
+                                });
+                            }
+                        }
+                        // wasm32 has no threads; load blocks the event loop.
+                        // Known limitation: large files will freeze UI on this platform.
+                        #[cfg(target_arch = "wasm32")]
                         match model::vox::load(path) {
                             Ok((mesh, dimensions)) => self.apply_scene(mesh, dimensions),
                             Err(e) => log::error!("Failed to load {path}: {e}"),
@@ -217,6 +256,24 @@ impl State {
     }
 
     fn update(&mut self, dt: Duration) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rx) = &self.load_receiver {
+            match rx.try_recv() {
+                Ok(Ok((mesh, dimensions))) => {
+                    self.apply_scene(mesh, dimensions);
+                    self.load_receiver = None;
+                }
+                Ok(Err(e)) => {
+                    log::error!("Failed to load scene: {e}");
+                    self.load_receiver = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.load_receiver = None;
+                }
+            }
+        }
+
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -412,6 +469,7 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
     GpuContext { instance, adapter, surface, device, queue, config, size }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn load_initial_scene() -> (model::Mesh, Vec3) {
     let vox_path = std::env::args().nth(1);
     let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
