@@ -1,36 +1,95 @@
-Simple MagicaVox viewer.
-Uses:
-- wgpu for rendering
-- dot_vox for parsing MagicaVox files
-- winit for window/input management
-- glam for 3d math
+![CI](https://github.com/bugsweeper/view_vox_using_wgpu/actions/workflows/ci.yml/badge.svg)
 
-Opens snow.vox by default, reads a command line argument to determine the path of the file to open, supports drag-and-drop files on window.
-After file loading adds rotating light cube.
+# vox_in_wgpu
 
-## Known Limitations
+![Wayland — smooth rendering](assets/preview_wayland.gif)
+*Wayland: high-FPS rendering*
 
-**Drag-and-drop on Wayland:** winit does not currently implement the Wayland drag-and-drop protocol (`wl_data_device`), so `DroppedFile` events are never delivered under a native Wayland session. To use drag-and-drop, force the X11 backend by unsetting `WAYLAND_DISPLAY`:
+![X11 — drag and drop](assets/preview_drag_and_drop.gif)
+*X11 (`WAYLAND_DISPLAY=""`) — drag-and-drop file loading*
+
+MagicaVoxel `.vox` file viewer built with [wgpu](https://wgpu.rs/).
+
+Opens `assets/snow.vox` by default. Pass a path as a CLI argument or drag and drop a `.vox` file onto the window.
+
+## Dependencies
+
+| Crate | Role |
+|---|---|
+| [wgpu](https://crates.io/crates/wgpu) | Cross-platform GPU API (Vulkan / Metal / DX12 / WebGL) |
+| [winit](https://crates.io/crates/winit) | Window creation and input handling |
+| [dot_vox](https://crates.io/crates/dot_vox) | MagicaVoxel file parsing |
+| [glam](https://crates.io/crates/glam) | 3D math (vectors, matrices, quaternions) |
+| [bytemuck](https://crates.io/crates/bytemuck) | Safe `&[u8]` casting for GPU buffer uploads |
+
+## Running
+
+```sh
+cargo run                          # opens assets/snow.vox
+cargo run -- path/to/model.vox    # opens a specific file
+RUST_LOG=info cargo run           # with loader statistics
+```
+
+## Controls
+
+| Input | Action |
+|---|---|
+| Left drag | Orbit around model |
+| Right drag | Pan |
+| Scroll wheel | Zoom |
+| W / S | Orbit up / down |
+| A / D | Orbit left / right |
+| Arrow keys | Pan |
+| Left Shift / Left Ctrl | Zoom in / out |
+| Drop `.vox` on window | Load file, reset camera |
+
+## Architecture
+
+```
+src/
+├── main.rs          entry point
+├── lib.rs           winit event loop (ApplicationHandler), wgpu State, init helpers
+├── camera.rs        OrbitCamera, Projection, OrbitController
+├── depth.rs         depth texture helper
+├── light.rs         LightUniform
+├── model/
+│   ├── mod.rs       Vertex, Mesh, LightVertex, light cube geometry
+│   └── vox.rs       .vox loader, hidden-face culling, LoadError
+├── shader.wgsl      Blinn-Phong lighting, color baked per-vertex
+└── light.wgsl       flat-shaded light cube
+```
+
+## Performance notes
+
+- Hidden-face culling reduces vertex count by ~70–90% on typical dense models (exact numbers logged at startup with `RUST_LOG=info`).
+- Color is stored as `Unorm8x4` (4 bytes per vertex) rather than `Float32x4` (16 bytes), reducing vertex buffer size 4×.
+- File parsing runs on a background thread, so the render loop never blocks — GPU initialisation and `.vox` parsing overlap at startup.
+- The light cube rotates via a quaternion applied to its position each frame; no per-frame buffer reallocation.
+
+## Technical decisions
+
+**Hidden-face culling** — the loader builds a `HashSet` of all occupied voxel positions and emits geometry only for faces with no neighbour. Compared to per-instance full-cube rendering this reduces vertex count significantly for dense models (logged at load time with `RUST_LOG=info`).
+
+**Flat mesh instead of instancing** — voxel color is baked into each vertex (`Unorm8x4`), so the render pipeline needs no instance buffer and no per-instance shader logic. The trade-off is higher upload cost on scene reload, which is acceptable because reloads are infrequent.
+
+**Background loading** — `.vox` parsing runs on a dedicated thread (`std::thread::spawn` + `mpsc::channel`). The initial file is loaded concurrently with GPU initialisation. The render loop polls `try_recv` each frame; a new drop is ignored while a previous load is still in progress.
+
+**Error handling** — IO and parse failures are represented as `LoadError::Io` / `LoadError::Parse` / `LoadError::Empty`. The loader separates `std::fs::read` from `dot_vox::load_bytes` so the error variant is determined structurally, not by inspecting the error message.
+
+## Known limitations
+
+**Drag-and-drop on Wayland** — winit does not implement the `wl_data_device` protocol, so `DroppedFile` events are never delivered in a native Wayland session. Workaround — force the X11 backend:
 
 ```sh
 WAYLAND_DISPLAY="" cargo run
 ```
 
-Note: if your file manager runs as a native Wayland application it may also refuse to drop files onto an XWayland window. In that case use the CLI argument instead:
+Note: if your file manager is a native Wayland application it may refuse to drop onto an XWayland window. Use the CLI argument in that case:
 
 ```sh
 WAYLAND_DISPLAY="" cargo run -- path/to/model.vox
 ```
 
-## Controls
+**wasm32 drag-and-drop** — on the WebAssembly target file loading blocks the event loop because the browser has no thread-safe file API available to wasm. Large files will freeze the UI.
 
-Mouse controls:
-- Left Mouse drag - Orbit around model
-- Right Mouse drag - Pan
-- Scroll Wheel - Zoom
-- Drop vox-file on window - Open file, reset camera to model center
-
-Keyboard controls:
-- W/S/A/D - Orbit
-- Arrow keys - Pan
-- Left Shift / Left Control - Zoom in / out
+**Multi-model `.vox` files** — voxels from all models are merged into a single `HashSet` for neighbour lookup, so face culling works correctly across model boundaries. However, model transforms defined in the scene graph are ignored; all models are rendered at their raw voxel coordinates.
