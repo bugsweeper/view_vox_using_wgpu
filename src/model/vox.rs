@@ -49,12 +49,12 @@ const FACES: [([i32; 3], [f32; 4], [[f32; 4]; 4]); 6] = [
 
 pub fn load(vox_path: &str) -> Result<(Mesh, Vec3), LoadError> {
     log::info!("Loading {}", vox_path);
+    let bytes = std::fs::read(vox_path).map_err(|e| LoadError::Io(e.to_string()))?;
+    let vox = dot_vox::load_bytes(&bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
+    build_mesh(&vox)
+}
 
-    let bytes = std::fs::read(vox_path)
-        .map_err(|e| LoadError::Io(e.to_string()))?;
-    let vox = dot_vox::load_bytes(&bytes)
-        .map_err(|e| LoadError::Parse(e.to_string()))?;
-
+pub(crate) fn build_mesh(vox: &dot_vox::DotVoxData) -> Result<(Mesh, Vec3), LoadError> {
     if vox.models.is_empty() {
         return Err(LoadError::Empty);
     }
@@ -136,4 +136,103 @@ pub fn load(vox_path: &str) -> Result<(Mesh, Vec3), LoadError> {
     );
 
     Ok((Mesh { vertices, indices }, dimensions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dot_vox::{DotVoxData, Model, Size, Voxel};
+
+    fn vox_with_voxels(voxels: Vec<Voxel>) -> DotVoxData {
+        DotVoxData {
+            version: 150,
+            models: vec![Model {
+                size: Size { x: 10, y: 10, z: 10 },
+                voxels,
+            }],
+            palette: dot_vox::DEFAULT_PALETTE.to_vec(),
+            materials: Default::default(),
+            scenes: vec![],
+            layers: vec![],
+            index_map: dot_vox::DEFAULT_INDEX_MAP.to_vec(),
+        }
+    }
+
+    #[test]
+    fn load_valid_file() {
+        assert!(load("assets/snow.vox").is_ok());
+    }
+
+    #[test]
+    fn load_invalid_path() {
+        let err = load("nonexistent.vox").unwrap_err();
+        assert!(matches!(err, LoadError::Io(_)));
+    }
+
+    #[test]
+    fn load_malformed_bytes() {
+        let tmp = std::env::temp_dir().join("malformed_test.vox");
+        std::fs::write(&tmp, b"not a vox file").unwrap();
+        let err = load(tmp.to_str().unwrap()).unwrap_err();
+        assert!(matches!(err, LoadError::Parse(_)));
+    }
+
+    #[test]
+    fn build_mesh_no_models() {
+        let vox = DotVoxData {
+            version: 150,
+            models: vec![],
+            palette: vec![],
+            materials: Default::default(),
+            scenes: vec![],
+            layers: vec![],
+            index_map: dot_vox::DEFAULT_INDEX_MAP.to_vec(),
+        };
+        assert!(matches!(build_mesh(&vox), Err(LoadError::Empty)));
+    }
+
+    #[test]
+    fn build_mesh_empty_model() {
+        let vox = vox_with_voxels(vec![]);
+        assert!(matches!(build_mesh(&vox), Err(LoadError::Empty)));
+    }
+
+    #[test]
+    fn single_isolated_voxel_has_6_faces() {
+        let vox = vox_with_voxels(vec![Voxel { x: 0, y: 0, z: 0, i: 1 }]);
+        let (mesh, _) = build_mesh(&vox).unwrap();
+        // 6 faces × 2 triangles × 3 indices = 36
+        assert_eq!(mesh.indices.len(), 36);
+        // 6 faces × 4 vertices per quad = 24
+        assert_eq!(mesh.vertices.len(), 24);
+    }
+
+    #[test]
+    fn two_adjacent_voxels_share_two_hidden_faces() {
+        // Voxels at (0,0,0) and (1,0,0) share one face each → 10 visible faces total
+        let vox = vox_with_voxels(vec![
+            Voxel { x: 0, y: 0, z: 0, i: 1 },
+            Voxel { x: 1, y: 0, z: 0, i: 1 },
+        ]);
+        let (mesh, _) = build_mesh(&vox).unwrap();
+        // 10 faces × 6 indices = 60
+        assert_eq!(mesh.indices.len(), 60);
+    }
+
+    #[test]
+    fn fully_enclosed_voxel_emits_no_faces() {
+        // Center voxel surrounded on all 6 sides — all faces culled
+        let vox = vox_with_voxels(vec![
+            Voxel { x: 1, y: 1, z: 1, i: 1 }, // center
+            Voxel { x: 2, y: 1, z: 1, i: 1 }, // +X
+            Voxel { x: 0, y: 1, z: 1, i: 1 }, // -X
+            Voxel { x: 1, y: 2, z: 1, i: 1 }, // +Y
+            Voxel { x: 1, y: 0, z: 1, i: 1 }, // -Y
+            Voxel { x: 1, y: 1, z: 2, i: 1 }, // +Z
+            Voxel { x: 1, y: 1, z: 0, i: 1 }, // -Z
+        ]);
+        let (mesh, _) = build_mesh(&vox).unwrap();
+        // Outer 6 voxels each have 5 visible faces (one shared with center) = 30 faces
+        assert_eq!(mesh.indices.len() / 6, 30);
+    }
 }
