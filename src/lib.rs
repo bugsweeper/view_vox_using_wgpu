@@ -85,16 +85,21 @@ impl State {
         #[cfg(not(target_arch = "wasm32"))]
         let (mesh, dimensions) = match initial_load_rx.recv() {
             Ok(Ok(scene)) => scene,
-            Ok(Err(e)) => { eprintln!("Error: {e}"); std::process::exit(1); }
-            Err(_) => { eprintln!("Error: load thread panicked"); std::process::exit(1); }
+            Ok(Err(e)) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("Error: load thread panicked");
+                std::process::exit(1);
+            }
         };
         #[cfg(target_arch = "wasm32")]
         let (mesh, dimensions) = load_initial_scene();
         let (camera, projection, camera_controller) =
             init_camera(dimensions, gpu.config.width, gpu.config.height);
 
-        let buffers =
-            create_buffers(&gpu.device, &mesh, &camera, &projection, dimensions);
+        let buffers = create_buffers(&gpu.device, &mesh, &camera, &projection, dimensions);
         let bind_groups =
             create_bind_groups(&gpu.device, &buffers.camera_buffer, &buffers.light_buffer);
         let pipelines = create_pipelines(
@@ -132,7 +137,10 @@ impl State {
             light_bind_group: bind_groups.light_bind_group,
             orbit_pressed: false,
             pan_pressed: false,
-            fps_counter: FpsCounter { last_tick: Instant::now(), frames: 0 },
+            fps_counter: FpsCounter {
+                last_tick: Instant::now(),
+                frames: 0,
+            },
             #[cfg(not(target_arch = "wasm32"))]
             load_receiver: None,
         }
@@ -220,13 +228,15 @@ impl State {
             WindowEvent::DroppedFile(path_buf) => {
                 if path_buf
                     .extension()
-                    .map_or(false, |ext| ext.eq_ignore_ascii_case("vox"))
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("vox"))
                 {
                     if let Some(path) = path_buf.as_os_str().to_str() {
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             if self.load_receiver.is_some() {
-                                log::warn!("Ignoring drop of {path}: previous load still in progress");
+                                log::warn!(
+                                    "Ignoring drop of {path}: previous load still in progress"
+                                );
                             } else {
                                 let path = path.to_owned();
                                 let (tx, rx) = mpsc::channel();
@@ -295,7 +305,8 @@ impl State {
 
     fn render(&mut self) -> Result<(), String> {
         let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Lost => return Err("Lost".into()),
             wgpu::CurrentSurfaceTexture::Outdated => return Err("Outdated".into()),
             wgpu::CurrentSurfaceTexture::Timeout => return Err("Timeout".into()),
@@ -345,7 +356,8 @@ impl State {
 
             render_pass.set_pipeline(&self.light_render_pipeline);
             render_pass.set_vertex_buffer(0, self.light_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.light_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass
+                .set_index_buffer(self.light_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.light_num_indices, 0, 0..1);
         }
 
@@ -433,17 +445,15 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
         });
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::downlevel_webgl2_defaults()
-                } else {
-                    wgpu::Limits::default()
-                },
-                ..Default::default()
+        .request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: if cfg!(target_arch = "wasm32") {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
             },
-        )
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -466,7 +476,15 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
     };
     surface.configure(&device, &config);
 
-    GpuContext { instance, adapter, surface, device, queue, config, size }
+    GpuContext {
+        instance,
+        adapter,
+        surface,
+        device,
+        queue,
+        config,
+        size,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -482,7 +500,11 @@ fn load_initial_scene() -> (model::Mesh, Vec3) {
     }
 }
 
-fn init_camera(dimensions: Vec3, width: u32, height: u32) -> (OrbitCamera, Projection, OrbitController) {
+fn init_camera(
+    dimensions: Vec3,
+    width: u32,
+    height: u32,
+) -> (OrbitCamera, Projection, OrbitController) {
     let camera = OrbitCamera {
         target: dimensions / 2.0,
         distance: dimensions.z * 2.0,
@@ -540,7 +562,17 @@ fn create_buffers(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    SceneBuffers { vertex_buffer, index_buffer, num_indices, light_vertex_buffer, light_index_buffer, light_num_indices, camera_buffer, light_uniform, light_buffer }
+    SceneBuffers {
+        vertex_buffer,
+        index_buffer,
+        num_indices,
+        light_vertex_buffer,
+        light_index_buffer,
+        light_num_indices,
+        camera_buffer,
+        light_uniform,
+        light_buffer,
+    }
 }
 
 fn create_bind_groups(
@@ -585,7 +617,12 @@ fn create_bind_groups(
         label: Some("light_bind_group"),
     });
 
-    BindGroups { camera_layout, camera_bind_group, light_layout, light_bind_group }
+    BindGroups {
+        camera_layout,
+        camera_bind_group,
+        light_layout,
+        light_bind_group,
+    }
 }
 
 fn create_pipelines(
@@ -624,7 +661,10 @@ fn create_pipelines(
         wgpu::include_wgsl!("light.wgsl"),
     );
 
-    Pipelines { render_pipeline, light_render_pipeline }
+    Pipelines {
+        render_pipeline,
+        light_render_pipeline,
+    }
 }
 
 fn create_render_pipeline(
@@ -772,7 +812,7 @@ impl ApplicationHandler for App {
         if self
             .state
             .as_ref()
-            .map_or(true, |s| s.window().id() != window_id)
+            .is_none_or(|s| s.window().id() != window_id)
         {
             return;
         }

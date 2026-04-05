@@ -20,31 +20,21 @@ impl std::fmt::Display for LoadError {
 }
 
 // Each face: (neighbor offset to check, normal, 4 quad vertices relative to voxel origin)
+#[allow(clippy::type_complexity)]
+#[rustfmt::skip]
 const FACES: [([i32; 3], [f32; 4], [[f32; 4]; 4]); 6] = [
     // top (+Z)
-    ([0, 0, 1], [0., 0., 1., 0.], [
-        [0., 0., 1., 1.], [1., 0., 1., 1.], [1., 1., 1., 1.], [0., 1., 1., 1.],
-    ]),
+    ([0, 0, 1],  [0., 0.,  1., 0.], [[0., 0., 1., 1.], [1., 0., 1., 1.], [1., 1., 1., 1.], [0., 1., 1., 1.]]),
     // bottom (-Z)
-    ([0, 0, -1], [0., 0., -1., 0.], [
-        [0., 1., 0., 1.], [1., 1., 0., 1.], [1., 0., 0., 1.], [0., 0., 0., 1.],
-    ]),
+    ([0, 0, -1], [0., 0., -1., 0.], [[0., 1., 0., 1.], [1., 1., 0., 1.], [1., 0., 0., 1.], [0., 0., 0., 1.]]),
     // right (+X)
-    ([1, 0, 0], [1., 0., 0., 0.], [
-        [1., 0., 0., 1.], [1., 1., 0., 1.], [1., 1., 1., 1.], [1., 0., 1., 1.],
-    ]),
+    ([1, 0, 0],  [1., 0.,  0., 0.], [[1., 0., 0., 1.], [1., 1., 0., 1.], [1., 1., 1., 1.], [1., 0., 1., 1.]]),
     // left (-X)
-    ([-1, 0, 0], [-1., 0., 0., 0.], [
-        [0., 0., 1., 1.], [0., 1., 1., 1.], [0., 1., 0., 1.], [0., 0., 0., 1.],
-    ]),
+    ([-1, 0, 0], [-1., 0., 0., 0.], [[0., 0., 1., 1.], [0., 1., 1., 1.], [0., 1., 0., 1.], [0., 0., 0., 1.]]),
     // front (+Y)
-    ([0, 1, 0], [0., 1., 0., 0.], [
-        [1., 1., 0., 1.], [0., 1., 0., 1.], [0., 1., 1., 1.], [1., 1., 1., 1.],
-    ]),
+    ([0, 1, 0],  [0., 1.,  0., 0.], [[1., 1., 0., 1.], [0., 1., 0., 1.], [0., 1., 1., 1.], [1., 1., 1., 1.]]),
     // back (-Y)
-    ([0, -1, 0], [0., -1., 0., 0.], [
-        [1., 0., 1., 1.], [0., 0., 1., 1.], [0., 0., 0., 1.], [1., 0., 0., 1.],
-    ]),
+    ([0, -1, 0], [0., -1., 0., 0.], [[1., 0., 1., 1.], [0., 0., 1., 1.], [0., 0., 0., 1.], [1., 0., 0., 1.]]),
 ];
 
 pub fn load(vox_path: &str) -> Result<(Mesh, Vec3), LoadError> {
@@ -63,7 +53,11 @@ pub(crate) fn build_mesh(vox: &dot_vox::DotVoxData) -> Result<(Mesh, Vec3), Load
     let occupied: HashSet<(i32, i32, i32)> = vox
         .models
         .iter()
-        .flat_map(|m| m.voxels.iter().map(|v| (v.x as i32, v.y as i32, v.z as i32)))
+        .flat_map(|m| {
+            m.voxels
+                .iter()
+                .map(|v| (v.x as i32, v.y as i32, v.z as i32))
+        })
         .collect();
 
     let total_voxels: usize = vox.models.iter().map(|m| m.voxels.len()).sum();
@@ -147,7 +141,11 @@ mod tests {
         DotVoxData {
             version: 150,
             models: vec![Model {
-                size: Size { x: 10, y: 10, z: 10 },
+                size: Size {
+                    x: 10,
+                    y: 10,
+                    z: 10,
+                },
                 voxels,
             }],
             palette: dot_vox::DEFAULT_PALETTE.to_vec(),
@@ -199,7 +197,12 @@ mod tests {
 
     #[test]
     fn single_isolated_voxel_has_6_faces() {
-        let vox = vox_with_voxels(vec![Voxel { x: 0, y: 0, z: 0, i: 1 }]);
+        let vox = vox_with_voxels(vec![Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            i: 1,
+        }]);
         let (mesh, _) = build_mesh(&vox).unwrap();
         // 6 faces × 2 triangles × 3 indices = 36
         assert_eq!(mesh.indices.len(), 36);
@@ -211,8 +214,18 @@ mod tests {
     fn two_adjacent_voxels_share_two_hidden_faces() {
         // Voxels at (0,0,0) and (1,0,0) share one face each → 10 visible faces total
         let vox = vox_with_voxels(vec![
-            Voxel { x: 0, y: 0, z: 0, i: 1 },
-            Voxel { x: 1, y: 0, z: 0, i: 1 },
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                i: 1,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                i: 1,
+            },
         ]);
         let (mesh, _) = build_mesh(&vox).unwrap();
         // 10 faces × 6 indices = 60
@@ -223,13 +236,48 @@ mod tests {
     fn fully_enclosed_voxel_emits_no_faces() {
         // Center voxel surrounded on all 6 sides — all faces culled
         let vox = vox_with_voxels(vec![
-            Voxel { x: 1, y: 1, z: 1, i: 1 }, // center
-            Voxel { x: 2, y: 1, z: 1, i: 1 }, // +X
-            Voxel { x: 0, y: 1, z: 1, i: 1 }, // -X
-            Voxel { x: 1, y: 2, z: 1, i: 1 }, // +Y
-            Voxel { x: 1, y: 0, z: 1, i: 1 }, // -Y
-            Voxel { x: 1, y: 1, z: 2, i: 1 }, // +Z
-            Voxel { x: 1, y: 1, z: 0, i: 1 }, // -Z
+            Voxel {
+                x: 1,
+                y: 1,
+                z: 1,
+                i: 1,
+            }, // center
+            Voxel {
+                x: 2,
+                y: 1,
+                z: 1,
+                i: 1,
+            }, // +X
+            Voxel {
+                x: 0,
+                y: 1,
+                z: 1,
+                i: 1,
+            }, // -X
+            Voxel {
+                x: 1,
+                y: 2,
+                z: 1,
+                i: 1,
+            }, // +Y
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 1,
+                i: 1,
+            }, // -Y
+            Voxel {
+                x: 1,
+                y: 1,
+                z: 2,
+                i: 1,
+            }, // +Z
+            Voxel {
+                x: 1,
+                y: 1,
+                z: 0,
+                i: 1,
+            }, // -Z
         ]);
         let (mesh, _) = build_mesh(&vox).unwrap();
         // Outer 6 voxels each have 5 visible faces (one shared with center) = 30 faces

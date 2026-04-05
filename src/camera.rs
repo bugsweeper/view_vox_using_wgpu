@@ -36,8 +36,7 @@ impl OrbitCamera {
     pub fn position(&self) -> Vec3 {
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-        self.target
-            + self.distance * Vec3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw)
+        self.target + self.distance * Vec3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw)
     }
 
     pub fn calc_matrix(&self) -> Mat4 {
@@ -138,19 +137,20 @@ impl OrbitController {
         }
     }
 
+    #[rustfmt::skip]
     pub fn process_keyboard(&mut self, key: KeyCode, state: ElementState) -> bool {
         let v = if state == ElementState::Pressed { 1.0 } else { 0.0 };
         match key {
-            KeyCode::KeyW => { self.kb_orbit_up    = v; true }
-            KeyCode::KeyS => { self.kb_orbit_down  = v; true }
-            KeyCode::KeyA => { self.kb_orbit_left  = v; true }
-            KeyCode::KeyD => { self.kb_orbit_right = v; true }
-            KeyCode::ArrowUp    => { self.kb_pan_up    = v; true }
-            KeyCode::ArrowDown  => { self.kb_pan_down  = v; true }
-            KeyCode::ArrowLeft  => { self.kb_pan_left  = v; true }
-            KeyCode::ArrowRight => { self.kb_pan_right = v; true }
-            KeyCode::ShiftLeft  => { self.kb_zoom_in   = v; true }
-            KeyCode::ControlLeft => { self.kb_zoom_out = v; true }
+            KeyCode::KeyW        => { self.kb_orbit_up    = v; true }
+            KeyCode::KeyS        => { self.kb_orbit_down  = v; true }
+            KeyCode::KeyA        => { self.kb_orbit_left  = v; true }
+            KeyCode::KeyD        => { self.kb_orbit_right = v; true }
+            KeyCode::ArrowUp     => { self.kb_pan_up      = v; true }
+            KeyCode::ArrowDown   => { self.kb_pan_down    = v; true }
+            KeyCode::ArrowLeft   => { self.kb_pan_left    = v; true }
+            KeyCode::ArrowRight  => { self.kb_pan_right   = v; true }
+            KeyCode::ShiftLeft   => { self.kb_zoom_in     = v; true }
+            KeyCode::ControlLeft => { self.kb_zoom_out    = v; true }
             _ => false,
         }
     }
@@ -176,10 +176,9 @@ impl OrbitController {
         let dt = dt.as_secs_f32();
 
         // Orbit (mouse + keyboard)
-        let orbit_dx = self.rotate_horizontal
-            + (self.kb_orbit_right - self.kb_orbit_left) * 90.0 * dt;
-        let orbit_dy = self.rotate_vertical
-            + (self.kb_orbit_down - self.kb_orbit_up) * 90.0 * dt;
+        let orbit_dx =
+            self.rotate_horizontal + (self.kb_orbit_right - self.kb_orbit_left) * 90.0 * dt;
+        let orbit_dy = self.rotate_vertical + (self.kb_orbit_down - self.kb_orbit_up) * 90.0 * dt;
         camera.yaw += orbit_dx * self.orbit_sensitivity;
         camera.pitch += orbit_dy * self.orbit_sensitivity;
         camera.pitch = camera
@@ -188,10 +187,8 @@ impl OrbitController {
 
         // Pan (mouse + keyboard), scaled by distance
         let pan_scale = camera.distance * self.pan_sensitivity;
-        let pan_dx = self.pan_horizontal
-            + (self.kb_pan_right - self.kb_pan_left) * 60.0 * dt;
-        let pan_dy = self.pan_vertical
-            + (self.kb_pan_down - self.kb_pan_up) * 60.0 * dt;
+        let pan_dx = self.pan_horizontal + (self.kb_pan_right - self.kb_pan_left) * 60.0 * dt;
+        let pan_dy = self.pan_vertical + (self.kb_pan_down - self.kb_pan_up) * 60.0 * dt;
         camera.target -= camera.right() * pan_dx * pan_scale;
         camera.target += camera.up() * pan_dy * pan_scale;
 

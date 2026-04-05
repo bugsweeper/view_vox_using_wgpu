@@ -53,6 +53,7 @@ impl LightVertex {
     }
 }
 
+#[rustfmt::skip]
 pub const LIGHT_CUBE_VERTICES: &[LightVertex] = &[
     LightVertex { position: [0., 0., 1., 1.] },
     LightVertex { position: [1., 0., 1., 1.] },
@@ -80,6 +81,7 @@ pub const LIGHT_CUBE_VERTICES: &[LightVertex] = &[
     LightVertex { position: [1., 0., 0., 1.] },
 ];
 
+#[rustfmt::skip]
 pub const LIGHT_CUBE_INDICES: &[u16] = &[
     0, 1, 2, 2, 3, 0,
     4, 5, 6, 6, 7, 4,
