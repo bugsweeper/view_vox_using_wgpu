@@ -82,7 +82,7 @@ src/
 A WebAssembly build is deployed automatically on each push to `main`:
 **https://bugsweeper.github.io/view_vox_using_wgpu/**
 
-The web version opens the bundled `snow.vox` on startup. Drag-and-drop is not available in the browser (see Known limitations below).
+The web version opens the bundled `snow.vox` on startup. You can drop any `.vox` file onto the canvas to load it. Note: parsing and mesh generation run synchronously on the main thread inside the `FileReader` callback, so large files will freeze the UI briefly.
 
 To build locally:
 ```sh
@@ -104,7 +104,5 @@ Note: if your file manager is a native Wayland application it may refuse to drop
 ```sh
 WAYLAND_DISPLAY="" cargo run -- path/to/model.vox
 ```
-
-**wasm32 drag-and-drop** — on the WebAssembly target file loading blocks the event loop because the browser has no thread-safe file API available to wasm. Large files will freeze the UI.
 
 **Multi-model `.vox` files** — voxels from all models are merged into a single `HashSet` for neighbour lookup, so face culling works correctly across model boundaries. However, model transforms defined in the scene graph are ignored; all models are rendered at their raw voxel coordinates.

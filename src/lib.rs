@@ -737,6 +737,9 @@ struct App {
     window: Option<Arc<Window>>,
     #[cfg(target_arch = "wasm32")]
     pending_state: std::rc::Rc<std::cell::RefCell<Option<State>>>,
+    #[cfg(target_arch = "wasm32")]
+    pending_scene:
+        std::rc::Rc<std::cell::RefCell<Option<Result<(model::Mesh, Vec3), model::vox::LoadError>>>>,
 }
 
 impl App {
@@ -749,6 +752,8 @@ impl App {
             window: None,
             #[cfg(target_arch = "wasm32")]
             pending_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            pending_scene: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
     }
 }
@@ -787,6 +792,61 @@ impl ApplicationHandler for App {
                 .unwrap_or((800, 600));
             let _ = window.request_inner_size(PhysicalSize::new(w, h));
 
+            // Register drag-and-drop on the canvas element.
+            #[allow(unused_imports)]
+            {
+                use wasm_bindgen::{closure::Closure, JsCast};
+                use web_sys::{DragEvent, FileReader, ProgressEvent};
+
+                if let Some(canvas) = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.query_selector("canvas").ok().flatten())
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    let dragover = Closure::wrap(
+                        Box::new(move |e: DragEvent| e.prevent_default()) as Box<dyn FnMut(_)>
+                    );
+                    canvas.set_ondragover(Some(dragover.as_ref().unchecked_ref()));
+                    dragover.forget();
+
+                    let pending_scene = self.pending_scene.clone();
+                    let ondrop = Closure::wrap(Box::new(move |e: DragEvent| {
+                        e.prevent_default();
+                        let file = e
+                            .data_transfer()
+                            .and_then(|dt| dt.files())
+                            .and_then(|fl| fl.get(0));
+                        let file = match file {
+                            Some(f) if f.name().to_ascii_lowercase().ends_with(".vox") => f,
+                            _ => return,
+                        };
+                        let reader = match FileReader::new() {
+                            Ok(r) => r,
+                            Err(_) => return,
+                        };
+                        let pending = pending_scene.clone();
+                        let reader2 = reader.clone();
+                        let onload = wasm_bindgen::closure::Closure::once_into_js(
+                            move |_: ProgressEvent| {
+                                let bytes = reader2
+                                    .result()
+                                    .ok()
+                                    .and_then(|v| v.dyn_into::<js_sys::ArrayBuffer>().ok())
+                                    .map(|buf| js_sys::Uint8Array::new(&buf).to_vec());
+                                if let Some(bytes) = bytes {
+                                    *pending.borrow_mut() =
+                                        Some(model::vox::load_from_bytes(&bytes));
+                                }
+                            },
+                        );
+                        reader.set_onload(Some(onload.unchecked_ref()));
+                        let _ = reader.read_as_array_buffer(&file);
+                    }) as Box<dyn FnMut(_)>);
+                    canvas.set_ondrop(Some(ondrop.as_ref().unchecked_ref()));
+                    ondrop.forget();
+                }
+            }
+
             self.window = Some(window.clone());
             let pending = self.pending_state.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -813,6 +873,21 @@ impl ApplicationHandler for App {
             if let Some(state) = self.pending_state.borrow_mut().take() {
                 self.surface_configured = true;
                 self.state = Some(state);
+            }
+        }
+
+        // wasm: apply scene loaded via drag-and-drop FileReader callback.
+        // Only consume pending_scene once state is ready — otherwise the result
+        // would be silently dropped if the file loads before State::new finishes.
+        #[cfg(target_arch = "wasm32")]
+        if self.state.is_some() && self.pending_scene.borrow().is_some() {
+            if let Some(result) = self.pending_scene.borrow_mut().take() {
+                match result {
+                    Ok((mesh, dimensions)) => {
+                        self.state.as_mut().unwrap().apply_scene(mesh, dimensions);
+                    }
+                    Err(e) => log::error!("Failed to load dropped file: {e}"),
+                }
             }
         }
 
