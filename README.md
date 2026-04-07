@@ -1,4 +1,5 @@
 ![CI](https://github.com/bugsweeper/view_vox_using_wgpu/actions/workflows/ci.yml/badge.svg)
+![Pages](https://github.com/bugsweeper/view_vox_using_wgpu/actions/workflows/pages.yml/badge.svg)
 
 # vox_in_wgpu
 
@@ -75,6 +76,20 @@ src/
 **Background loading** — `.vox` parsing runs on a dedicated thread (`std::thread::spawn` + `mpsc::channel`). The initial file is loaded concurrently with GPU initialisation. The render loop polls `try_recv` each frame; a new drop is ignored while a previous load is still in progress.
 
 **Error handling** — IO and parse failures are represented as `LoadError::Io` / `LoadError::Parse` / `LoadError::Empty`. The loader separates `std::fs::read` from `dot_vox::load_bytes` so the error variant is determined structurally, not by inspecting the error message.
+
+## Web / GitHub Pages
+
+A WebAssembly build is deployed automatically on each push to `main`:
+**https://bugsweeper.github.io/view_vox_using_wgpu/**
+
+The web version opens the bundled `snow.vox` on startup. Drag-and-drop is not available in the browser (see Known limitations below).
+
+To build locally:
+```sh
+cargo install trunk
+trunk serve          # dev server at http://localhost:8080
+trunk build --release  # production build → dist/
+```
 
 ## Known limitations
 

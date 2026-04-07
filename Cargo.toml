@@ -12,6 +12,7 @@ winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1.25", features = [ "derive" ] }
 glam = "0.32"
+web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dot_vox = "5.1.1"
@@ -31,3 +32,7 @@ dot_vox = { version = "5.1.1", default-features = false }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "vox_viewer"
+path = "src/main.rs"

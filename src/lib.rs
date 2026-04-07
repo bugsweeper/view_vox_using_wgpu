@@ -6,17 +6,16 @@ mod model;
 use camera::{CameraUniform, OrbitCamera, OrbitController, Projection};
 use glam::{Quat, Vec3};
 use model::{LightVertex, Vertex, LIGHT_CUBE_INDICES, LIGHT_CUBE_VERTICES};
-use std::{
-    f32::consts,
-    sync::{mpsc, Arc},
-    time::{Duration, Instant},
-};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
+use std::{f32::consts, sync::Arc, time::Duration};
+use web_time::Instant;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::PhysicalKey,
     window::Window,
 };
 
@@ -185,8 +184,9 @@ impl State {
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
+            let max_tex = self.device.limits().max_texture_dimension_2d;
+            self.config.width = new_size.width.min(max_tex);
+            self.config.height = new_size.height.min(max_tex);
             self.surface.configure(&self.device, &self.config);
             self.projection.resize(new_size.width, new_size.height);
             self.depth_texture =
@@ -464,11 +464,12 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
         .find(|f| f.is_srgb())
         .copied()
         .unwrap_or(surface_caps.formats[0]);
+    let max_tex = device.limits().max_texture_dimension_2d;
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
-        width: size.width,
-        height: size.height,
+        width: size.width.max(1).min(max_tex),
+        height: size.height.max(1).min(max_tex),
         present_mode: surface_caps.present_modes[0],
         alpha_mode: surface_caps.alpha_modes[0],
         view_formats: vec![],
@@ -489,12 +490,11 @@ async fn init_gpu(window: Arc<Window>) -> GpuContext {
 
 #[cfg(target_arch = "wasm32")]
 fn load_initial_scene() -> (model::Mesh, Vec3) {
-    let vox_path = std::env::args().nth(1);
-    let initial_path = vox_path.as_deref().unwrap_or("assets/snow.vox");
-    match model::vox::load(initial_path) {
+    const DEFAULT_VOX: &[u8] = include_bytes!("../assets/snow.vox");
+    match model::vox::load_from_bytes(DEFAULT_VOX) {
         Ok(scene) => scene,
         Err(e) => {
-            eprintln!("Error: {e}");
+            log::error!("Failed to load embedded scene: {e}");
             std::process::exit(1);
         }
     }
@@ -781,7 +781,11 @@ impl ApplicationHandler for App {
                     Some(())
                 })
                 .expect("Couldn't append canvas to document body.");
-            let _ = window.request_inner_size(PhysicalSize::new(450, 400));
+            let (w, h) = web_sys::window()
+                .map(|win| (win.inner_width().ok(), win.inner_height().ok()))
+                .and_then(|(w, h)| Some((w?.as_f64()? as u32, h?.as_f64()? as u32)))
+                .unwrap_or((800, 600));
+            let _ = window.request_inner_size(PhysicalSize::new(w, h));
 
             self.window = Some(window.clone());
             let pending = self.pending_state.clone();
@@ -806,7 +810,10 @@ impl ApplicationHandler for App {
         // wasm: promote pending state once async init completes
         #[cfg(target_arch = "wasm32")]
         if self.state.is_none() {
-            self.state = self.pending_state.borrow_mut().take();
+            if let Some(state) = self.pending_state.borrow_mut().take() {
+                self.surface_configured = true;
+                self.state = Some(state);
+            }
         }
 
         if self
@@ -829,7 +836,7 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        physical_key: PhysicalKey::Code(winit::keyboard::KeyCode::Escape),
                         ..
                     },
                 ..
@@ -917,6 +924,7 @@ pub async fn run() {
     }
 
     let event_loop = EventLoop::new().unwrap();
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut app = App::new();
 
     cfg_if::cfg_if! {

@@ -40,7 +40,11 @@ const FACES: [([i32; 3], [f32; 4], [[f32; 4]; 4]); 6] = [
 pub fn load(vox_path: &str) -> Result<(Mesh, Vec3), LoadError> {
     log::info!("Loading {}", vox_path);
     let bytes = std::fs::read(vox_path).map_err(|e| LoadError::Io(e.to_string()))?;
-    let vox = dot_vox::load_bytes(&bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
+    load_from_bytes(&bytes)
+}
+
+pub(crate) fn load_from_bytes(bytes: &[u8]) -> Result<(Mesh, Vec3), LoadError> {
+    let vox = dot_vox::load_bytes(bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
     build_mesh(&vox)
 }
 
